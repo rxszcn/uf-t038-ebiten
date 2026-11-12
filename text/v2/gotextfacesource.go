@@ -821,10 +821,48 @@ func (g *GoTextFaceSource) buildOutputs(text string, face *GoTextFace) []shaping
 	for _, r := range text {
 		g.runes = append(g.runes, r)
 	}
+
+	// Shape the text in spans delimited by segment separators
+	// (U+001C..U+001E, bidi class B). The bidi implementation used by
+	// both the segmenter and the L2 pass truncates its input at the
+	// first class-B codepoint, so a separator must never sit inside a
+	// shaping input, or every character after it would be silently
+	// dropped. Cut around each separator so that it forms a single-rune
+	// span of its own — a separator alone shapes fine and its bytes
+	// keep their glyph index information — shape every span on its own,
+	// and concatenate the outputs.
+	var outputs []shaping.Output
+	spanStart := 0
+	for i, r := range g.runes {
+		if !textutil.IsSegmentSeparator(r) {
+			continue
+		}
+		if i > spanStart {
+			outputs = append(outputs, g.buildOutputsForSpan(face, spanStart, i, bm)...)
+		}
+		outputs = append(outputs, g.buildOutputsForSpan(face, i, i+1, bm)...)
+		spanStart = i + 1
+	}
+	if spanStart < len(g.runes) {
+		outputs = append(outputs, g.buildOutputsForSpan(face, spanStart, len(g.runes), bm)...)
+	}
+
+	// Baselines must shift a whole line at once; per-output calls drift
+	// sideways runs apart in vertical writing.
+	(shaping.Line(outputs)).AdjustBaselines()
+	return outputs
+}
+
+// buildOutputsForSpan shapes g.runes[runStart:runEnd] and returns the
+// per-segment outputs. The span must not contain a segment separator,
+// except when the span is exactly one separator rune (see buildOutputs).
+//
+// The caller must hold g.shapeMu.
+func (g *GoTextFaceSource) buildOutputsForSpan(face *GoTextFace, runStart, runEnd int, bm faceBitmapState) []shaping.Output {
 	input := shaping.Input{
 		Text:         g.runes,
-		RunStart:     0,
-		RunEnd:       len(g.runes),
+		RunStart:     runStart,
+		RunEnd:       runEnd,
 		Direction:    face.diDirection(),
 		Face:         g.f,
 		FontFeatures: face.features.values(),
@@ -846,12 +884,14 @@ func (g *GoTextFaceSource) buildOutputs(text string, face *GoTextFace) []shaping
 		if face.diDirection().Progression() == di.TowardTopLeft {
 			defaultBidiDir = bidi.RightToLeft
 		}
-		bidiRuns := g.bidiPara.Segment(g.runes, defaultBidiDir)
+		bidiRuns := g.bidiPara.Segment(g.runes[runStart:runEnd], defaultBidiDir)
 
 		g.bidiLevelsBuf = slices.Grow(g.bidiLevelsBuf[:0], len(inputs))
 		var bi int
 		for _, in := range inputs {
-			for bi+1 < bidiRuns.NumRuns() && bidiRuns.Run(bi).End <= in.RunStart {
+			// The bidi runs are indexed relative to the span, while the
+			// inputs' run boundaries are relative to the whole text.
+			for bi+1 < bidiRuns.NumRuns() && bidiRuns.Run(bi).End+runStart <= in.RunStart {
 				bi++
 			}
 			var level bidi.Level
@@ -880,9 +920,6 @@ func (g *GoTextFaceSource) buildOutputs(text string, face *GoTextFace) []shaping
 			outputs[i] = g.shaper.ShapeNoExtents(input)
 		}
 	}
-	// Baselines must shift a whole line at once; per-output calls drift
-	// sideways runs apart in vertical writing.
-	(shaping.Line(outputs)).AdjustBaselines()
 	return outputs
 }
 

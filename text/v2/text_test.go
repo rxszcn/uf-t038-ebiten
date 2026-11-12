@@ -88,6 +88,157 @@ func TestGlyphIndexWithLineBreaks(t *testing.T) {
 	}
 }
 
+// TestGlyphIndexWithSegmentSeparators verifies that a segment separator
+// (U+001C..U+001E, bidi class B) does not silently drop the text after
+// it: every byte of the string, including the separator itself, must be
+// covered by a glyph's index range in every direction.
+func TestGlyphIndexWithSegmentSeparators(t *testing.T) {
+	source, err := text.NewGoTextFaceSource(bytes.NewReader(fonts.MPlus1pRegular_ttf))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sep := range []string{"\x1c", "\x1d", "\x1e"} {
+		for _, direction := range []text.Direction{
+			text.DirectionLeftToRight,
+			text.DirectionRightToLeft,
+			text.DirectionTopToBottomAndLeftToRight,
+			text.DirectionTopToBottomAndRightToLeft,
+		} {
+			sampleText := "abc" + sep + "defg" + sep + "hijklmno"
+			face := &text.GoTextFace{
+				Source:    source,
+				Direction: direction,
+				Size:      24,
+			}
+			got := sampleText
+			for _, g := range text.AppendGlyphs(nil, sampleText, face, nil) {
+				if g.StartIndexInBytes < 0 || g.EndIndexInBytes > len(got) || g.StartIndexInBytes >= g.EndIndexInBytes {
+					t.Errorf("sep: %q, direction: %v, invalid indices: [%d, %d)", sep, direction, g.StartIndexInBytes, g.EndIndexInBytes)
+					continue
+				}
+				got = got[:g.StartIndexInBytes] + strings.Repeat(" ", g.EndIndexInBytes-g.StartIndexInBytes) + got[g.EndIndexInBytes:]
+			}
+			for i, r := range got {
+				if r == ' ' {
+					continue
+				}
+				t.Errorf("sep: %q, direction: %v, unexpected rune %q at %d: %q", sep, direction, r, i, got)
+			}
+		}
+	}
+}
+
+// TestMeasureWithSegmentSeparators verifies that the measured size of a
+// string with a segment separator accounts for the whole string: the
+// text after the separator must contribute to the advance instead of
+// being truncated away.
+func TestMeasureWithSegmentSeparators(t *testing.T) {
+	const eps = 1.0 / (1 << 6)
+
+	source, err := text.NewGoTextFaceSource(bytes.NewReader(fonts.MPlus1pRegular_ttf))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sep := range []string{"\x1c", "\x1d", "\x1e"} {
+		s := "Hello" + sep + "World"
+		for _, direction := range []text.Direction{
+			text.DirectionLeftToRight,
+			text.DirectionRightToLeft,
+			text.DirectionTopToBottomAndLeftToRight,
+			text.DirectionTopToBottomAndRightToLeft,
+		} {
+			face := &text.GoTextFace{
+				Source:    source,
+				Direction: direction,
+				Size:      24,
+			}
+			// The primary axis is the width for horizontal faces and
+			// the height for vertical faces.
+			vertical := direction == text.DirectionTopToBottomAndLeftToRight || direction == text.DirectionTopToBottomAndRightToLeft
+			primaryOf := func(str string) float64 {
+				w, h := text.Measure(str, face, 0)
+				if vertical {
+					return h
+				}
+				return w
+			}
+			got := primaryOf(s)
+			want := primaryOf("Hello") + primaryOf(sep) + primaryOf("World")
+			if math.Abs(got-want) > eps {
+				t.Errorf("sep: %q, direction: %v, Measure(%q) = %v, want %v", sep, direction, s, got, want)
+			}
+			if got <= primaryOf("Hello") {
+				t.Errorf("sep: %q, direction: %v, Measure(%q) = %v, want more than Measure(%q) = %v", sep, direction, s, got, "Hello", primaryOf("Hello"))
+			}
+		}
+	}
+}
+
+// TestAdvanceAtBidiWithSegmentSeparator verifies that a segment
+// separator in mixed-direction text neither drops the text after it nor
+// breaks the bidi resolution of the surrounding runs: the Hebrew run
+// before the separator must still be visually reversed, and the
+// advances of the pieces must add up to the full line's advance.
+func TestAdvanceAtBidiWithSegmentSeparator(t *testing.T) {
+	const eps = 1.0 / (1 << 6)
+
+	source, err := text.NewGoTextFaceSource(bytes.NewReader(fonts.MPlus1pRegular_ttf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	face := &text.GoTextFace{
+		Source:    source,
+		Size:      24,
+		Direction: text.DirectionLeftToRight,
+	}
+
+	// Logical byte offsets:
+	//   a=0 b=1 c=2  א=3 ב=5 ג=7  \x1c=9  x=10 y=11 z=12  end=13
+	s := "abc" + "אבג" + "\x1c" + "xyz"
+
+	at := func(i int) float64 { return text.AdvanceAt(s, i, face) }
+
+	// Inside the RTL run, the leading-edge X decreases as the logical
+	// position advances: the separator later in the string must not
+	// disturb the reversal.
+	aAlef, aBet, aGimel := at(3), at(5), at(7)
+	if !(aAlef > aBet && aBet > aGimel) {
+		t.Errorf("RTL run not visually reversed: aAlef=%v aBet=%v aGimel=%v", aAlef, aBet, aGimel)
+	}
+
+	// The full advance equals the sum of the advances of the
+	// separator-free spans and the separator itself: nothing past the
+	// separator is lost.
+	full := at(len(s))
+	w1, _ := text.Measure("abc"+"אבג", face, 0)
+	wSep, _ := text.Measure("\x1c", face, 0)
+	w2, _ := text.Measure("xyz", face, 0)
+	if want := w1 + wSep + w2; math.Abs(full-want) > eps {
+		t.Errorf("AdvanceAt(len) = %v, want %v (= %v + %v + %v)", full, want, w1, wSep, w2)
+	}
+
+	// The LTR run after the separator grows monotonically again, up to
+	// the full advance.
+	aX, aY, aZ := at(10), at(11), at(12)
+	if !(aX < aY && aY < aZ && aZ < full) {
+		t.Errorf("LTR run after separator not monotonic: %v %v %v %v", aX, aY, aZ, full)
+	}
+
+	// Every byte, including the separator's, is covered by a glyph.
+	got := s
+	for _, g := range text.AppendGlyphs(nil, s, face, nil) {
+		got = got[:g.StartIndexInBytes] + strings.Repeat(" ", g.EndIndexInBytes-g.StartIndexInBytes) + got[g.EndIndexInBytes:]
+	}
+	for i, r := range got {
+		if r == ' ' {
+			continue
+		}
+		t.Errorf("unexpected rune %q at %d: %q", r, i, got)
+	}
+}
+
 func TestTextColor(t *testing.T) {
 	clr := color.RGBA{R: 0x80, G: 0x80, B: 0x80, A: 0x80}
 	img := ebiten.NewImage(30, 30)

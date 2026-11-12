@@ -142,6 +142,52 @@ func TestChunks(t *testing.T) {
 			text: "Hello. World.\u2028Extra.",
 			want: []string{"Hello.", " World."},
 		},
+		{
+			// A segment separator (U+001C..U+001E, bidi class B) is
+			// always a chunk of its own, so that no shaping input ever
+			// has a class-B codepoint in the middle.
+			name: "segment_separator_splits",
+			text: "Hello\x1cWorld",
+			want: []string{"Hello", "\x1c", "World"},
+		},
+		{
+			name: "segment_separators_consecutive",
+			text: "ab\x1c\x1dcd",
+			want: []string{"ab", "\x1c", "\x1d", "cd"},
+		},
+		{
+			name: "segment_separator_at_start",
+			text: "\x1eHello.",
+			want: []string{"\x1e", "Hello."},
+		},
+		{
+			name: "segment_separator_at_end",
+			text: "Hello.\x1c",
+			want: []string{"Hello.", "\x1c"},
+		},
+		{
+			// A combining mark right after a segment separator is
+			// absorbed into the separator's chunk, mirroring the WB4
+			// protection at sentence-terminator boundaries.
+			name: "segment_separator_absorbs_mark",
+			text: "ab\x1c\u0301cd",
+			want: []string{"ab", "\x1c\u0301", "cd"},
+		},
+		{
+			// A separator after the first line break is past the walk
+			// and produces no chunk.
+			name: "segment_separator_before_lf",
+			text: "ab\x1c\ncd",
+			want: []string{"ab", "\x1c"},
+		},
+		{
+			// Bidi path: the separator splits the line into spans that
+			// are bidi-segmented independently, and the separator is a
+			// chunk of its own between them.
+			name: "segment_separator_with_rtl_run",
+			text: "ab \u05db\u05d2\x1ccd",
+			want: []string{"ab ", "\u05db\u05d2", "\x1c", "cd"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -329,6 +375,26 @@ func TestChunks_Levels(t *testing.T) {
 			text:       "ab\u2067. cd.",
 			wantTexts:  []string{"ab\u2067", ". ", "cd", "."},
 			wantLevels: []bidi.Level{0, 1, 2, 1},
+		},
+		{
+			// A segment separator ends the bidi paragraph, so the
+			// spans around it are resolved independently. The
+			// separator itself is a chunk of its own at the paragraph
+			// level, per UAX #9's rule for class-B codepoints.
+			name:       "segment_separator_gets_paragraph_level",
+			text:       "ab\x1c\u05db\u05d2",
+			wantTexts:  []string{"ab", "\x1c", "\u05db\u05d2"},
+			wantLevels: []bidi.Level{0, 0, 1},
+		},
+		{
+			// Same under an RTL paragraph base: the separator takes
+			// paragraph level 1, and the LTR span after it resolves
+			// to level 2 on its own.
+			name:           "segment_separator_rtl_base",
+			text:           "\u05d0\u05d1\x1ccd",
+			paragraphLevel: 1,
+			wantTexts:      []string{"\u05d0\u05d1", "\x1c", "cd"},
+			wantLevels:     []bidi.Level{1, 1, 2},
 		},
 	}
 	for _, tc := range cases {

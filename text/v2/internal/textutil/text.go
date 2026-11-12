@@ -63,6 +63,22 @@ func FirstLineLen(str string) int {
 	return len(str)
 }
 
+// IsSegmentSeparator reports whether r is one of the Unicode information
+// separators U+001C..U+001E (FILE/GROUP/RECORD SEPARATOR). These are the
+// only codepoints with bidi class B (paragraph separator) that are not
+// line breaks, so they can appear in the middle of a line. The bidi
+// implementation used for shaping truncates its input at the first
+// class-B codepoint, so a line must be split at these separators before
+// bidi segmentation and shaping, or every character after the first
+// separator is silently dropped.
+func IsSegmentSeparator(r rune) bool {
+	switch r {
+	case '\u001c', '\u001d', '\u001e':
+		return true
+	}
+	return false
+}
+
 func TrimTailingLineBreak(str string) string {
 	// https://en.wikipedia.org/wiki/Newline#Unicode
 

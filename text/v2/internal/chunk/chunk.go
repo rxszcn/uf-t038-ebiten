@@ -20,7 +20,9 @@
 // visual order during composition.
 //
 // Chunk boundaries fall at bidi-level transitions, sentence
-// terminators, or whitespace within long no-terminator spans — none
+// terminators, segment separators (U+001C..U+001E, which the bidi
+// implementation cannot handle inside a shaping input), or whitespace
+// within long no-terminator spans — none
 // of which sit inside a typical ligature. Ligatures are therefore
 // unlikely to be split across two chunks. This is a property of the
 // boundary placement rather than a hard guarantee: exotic
@@ -96,32 +98,67 @@ func AppendChunks(dst []Chunk, text string, paragraphLevel bidi.Level) []Chunk {
 	if paragraphLevel%2 == 1 {
 		defaultDir = bidi.RightToLeft
 	}
+
+	// bidi.Paragraph truncates its input at the first class-B
+	// codepoint, so segment each separator-free span on its own and
+	// emit every segment separator (U+001C..U+001E) as a chunk of its
+	// own. Per UAX #9 a class-B codepoint ends the paragraph and takes
+	// the paragraph embedding level, so resolving each span as a
+	// separate paragraph at the paragraph level matches the whole-line
+	// resolution, and paragraphLevel is the right level for the
+	// separator chunk itself.
+	spanStart := 0
+	for i := 0; i < len(firstLine); {
+		r, w := utf8.DecodeRuneInString(firstLine[i:])
+		if !textutil.IsSegmentSeparator(r) {
+			i += w
+			continue
+		}
+		dst = appendBidiChunks(dst, firstLine[spanStart:i], paragraphLevel, defaultDir, spanStart)
+		end := absorbExtendFormat(firstLine, i+w)
+		dst = append(dst, Chunk{i, end, paragraphLevel})
+		i = end
+		spanStart = end
+	}
+	return appendBidiChunks(dst, firstLine[spanStart:], paragraphLevel, defaultDir, spanStart)
+}
+
+// appendBidiChunks runs the bidi algorithm on text, which must not
+// contain a segment separator (see [AppendChunks]), and appends the
+// resulting chunks to dst. paragraphLevel is the paragraph base level,
+// defaultDir the matching default direction, and byteOffset is added
+// to each chunk's Start/End so the result is in source-text
+// coordinates.
+func appendBidiChunks(dst []Chunk, text string, paragraphLevel bidi.Level, defaultDir bidi.Direction, byteOffset int) []Chunk {
+	if len(text) == 0 {
+		return dst
+	}
 	var p bidi.Paragraph
-	runs := p.SegmentString(firstLine, defaultDir)
+	runs := p.SegmentString(text, defaultDir)
 	if runs.NumRuns() == 0 {
-		return append(dst, Chunk{0, len(firstLine), paragraphLevel})
+		return append(dst, Chunk{byteOffset, byteOffset + len(text), paragraphLevel})
 	}
 
 	var byteIdx int
 	var runeIdx int
 	for ri := range runs.NumRuns() {
 		run := runs.Run(ri)
-		// Walk runes in firstLine until reaching the rune-indexed
+		// Walk runes in text until reaching the rune-indexed
 		// run boundary. The bidi package returns rune-indexed runs;
 		// chunker output is byte-indexed.
 		for runeIdx < run.Start {
-			_, w := utf8.DecodeRuneInString(firstLine[byteIdx:])
+			_, w := utf8.DecodeRuneInString(text[byteIdx:])
 			byteIdx += w
 			runeIdx++
 		}
 		runStart := byteIdx
 		for runeIdx < run.End {
-			_, w := utf8.DecodeRuneInString(firstLine[byteIdx:])
+			_, w := utf8.DecodeRuneInString(text[byteIdx:])
 			byteIdx += w
 			runeIdx++
 		}
 		runEnd := byteIdx
-		dst = appendChunksForRun(dst, firstLine[runStart:runEnd], run.Level, paragraphLevel, runStart)
+		dst = appendChunksForRun(dst, text[runStart:runEnd], run.Level, paragraphLevel, byteOffset+runStart)
 	}
 	return dst
 }
@@ -169,6 +206,22 @@ walk:
 			switch b {
 			case '\n', '\v', '\f', '\r':
 				break walk
+			}
+			// A segment separator (U+001C..U+001E, bidi class B) is
+			// always a chunk of its own: the bidi implementation used
+			// downstream truncates its input at the first class-B
+			// codepoint, so a separator must never share a chunk with
+			// other text, or the text after it would be dropped at
+			// shaping time.
+			if textutil.IsSegmentSeparator(rune(b)) {
+				end := absorbExtendFormat(text, i+1)
+				if chunkStart < i {
+					dst = append(dst, Chunk{byteOffset + chunkStart, byteOffset + i, level})
+				}
+				dst = append(dst, Chunk{byteOffset + i, byteOffset + end, level})
+				chunkStart = end
+				i = end
+				continue
 			}
 			// Whitespace fallback: when the current chunk has
 			// outgrown [fallbackBytes] without hitting a sentence

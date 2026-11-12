@@ -64,6 +64,36 @@ func TestLines(t *testing.T) {
 	}
 }
 
+func TestIsSegmentSeparator(t *testing.T) {
+	testCases := []struct {
+		In  rune
+		Out bool
+	}{
+		{In: '\u001c', Out: true},
+		{In: '\u001d', Out: true},
+		{In: '\u001e', Out: true},
+		// U+001F UNIT SEPARATOR is bidi class S, not B, and does not
+		// truncate bidi segmentation.
+		{In: '\u001f', Out: false},
+		{In: '\t', Out: false},
+		{In: '\x00', Out: false},
+		{In: 'a', Out: false},
+		// Line breaks are not segment separators, even though some of
+		// them share bidi class B.
+		{In: '\n', Out: false},
+		{In: '\v', Out: false},
+		{In: '\u0085', Out: false},
+		{In: '\u2029', Out: false},
+	}
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("%q", tc.In), func(t *testing.T) {
+			if got := textutil.IsSegmentSeparator(tc.In); got != tc.Out {
+				t.Errorf("IsSegmentSeparator(%q): got %t, want %t", tc.In, got, tc.Out)
+			}
+		})
+	}
+}
+
 func TestTrimTailingLineBreak(t *testing.T) {
 	testCases := []struct {
 		In  string
